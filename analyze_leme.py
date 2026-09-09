@@ -22,6 +22,7 @@ import numpy as np
 from scipy import stats
 
 from rngaudit.stats_core import run_battery, frequency_test
+from rngaudit.ledger import build, summarise
 
 WHEEL = 37
 score = lambda n: sum(int(c) for c in str(n)) % 10
@@ -93,64 +94,48 @@ def audit(paths: list[str]) -> None:
     print(f"    pengembalian ke pemain             : {th['E_return']*100:.2f}%")
     print(f"    >>> HOUSE EDGE = {(1-th['E_return'])*100:+.2f}% <<<")
 
-    print(f"\n[2] REKONSTRUKSI TARUHAN")
-    hdr = f"    {'dataset':<26}{'tuntas':>8}{'bandar':>8}{'pemain':>8}{'RES':>7}{'turnover':>14}{'P&L':>14}{'edge':>9}{'win%':>7}"
+    print(f"\n[2] BUKU KAS BANDAR (cocokkan per NAMA PEMAIN, fee 3% diperhitungkan)")
+    hdr = (f"    {'dataset':<26}{'tuntas':>8}{'bandar':>8}{'pemain':>8}"
+           f"{'turnover':>14}{'fee 3%':>11}{'P&L bersih':>14}{'edge':>8}{'win%':>7}")
     print(hdr); print("    " + "-" * (len(hdr) - 4))
     gt = gp = 0.0
-    spins_player: list[int] = []
-    spins_hoster: list[int] = []
-    counts = {"autowin": 0, "lose": 0, "res": 0, "win": 0}
-
-    for fidx, p in enumerate(paths):
-        txt = Path(p).read_text(encoding="utf-8", errors="replace")
-        ev = sorted(
-            [(m.start(), "bet", _num(m.group(2))) for m in RE_BET.finditer(txt)] +
-            [(m.start(), "bet", _num(m.group(2))) for m in RE_GOALL.finditer(txt)] +
-            [(m.start(), "hasil", int(m.group(3))) for m in RE_HASIL.finditer(txt)] +
-            [(m.start(), "autowin", -1) for m in RE_AUTOW.finditer(txt)])
-
-        for m in RE_HASIL.finditer(txt):
-            for k, rm in enumerate(RE_ROUND.finditer(m.group(1))):
-                # kunci urut: (file, posisi blok, urutan ronde dalam blok)
-                spins_player.append(((fidx, m.start(), k), int(rm.group(1))))
-            spins_hoster.append(((fidx, m.start(), 9), int(m.group(2))))
-            counts["res" if int(m.group(3)) == 2 else
-                   ("lose" if int(m.group(3)) == 0 else "win")] += 1
-        for m in RE_AUTOW.finditer(txt):
-            spins_hoster.append(((fidx, m.start(), 9), int(m.group(1)))); counts["autowin"] += 1
-        # CATATAN: baris "spin the wheel and got N" dari bot roulette adalah
-        # GEMA dari spin yang sama, bukan putaran tambahan. Memasukkannya akan
-        # menggandakan setiap spin dan menciptakan korelasi berurutan palsu
-        # (uji transisi langsung menyala p=0). Jadi hanya blok Hasil dan
-        # auto-win yang dipakai - itu catatan permainan yang otoritatif.
-
-        stake = None; pnl = turn = 0.0; nH = nP = nR = 0
-        for _, kind, val in ev:
-            if kind == "bet":
-                stake = val
-            elif stake is None:
-                continue
-            elif kind == "autowin":
-                pnl += stake; turn += stake; nH += 1; stake = None
-            else:
-                r = settle(val)
-                if r == "res": nR += 1; continue
-                if r == "house": pnl += stake; nH += 1
-                else: pnl += stake - stake * val / 2; nP += 1
-                turn += stake; stake = None
-
-        n = nH + nP
-        name = Path(p).stem[:26]
-        if n < 20:
-            print(f"    {name:<26}{n:>8}   -- sampel <20, tidak disimpulkan --"); continue
-        gt += turn; gp += pnl
-        print(f"    {name:<26}{n:>8,}{nH:>8,}{nP:>8,}{nR:>7,}{turn:>14,.0f}"
-              f"{pnl:>+14,.0f}{pnl/turn*100:>+8.2f}%{nH/n*100:>6.1f}%")
-
+    for pth in paths:
+        rows, st = build(pth)
+        sm = summarise(rows)
+        name = Path(pth).stem[:26]
+        if sm["n"] < 20:
+            print(f"    {name:<26}{sm['n']:>8}   -- sampel <20, tidak disimpulkan --"); continue
+        gt += sm["turnover"]; gp += sm["pnl"]
+        print(f"    {name:<26}{sm['n']:>8,}{sm['house_wins']:>8,}{sm['player_wins']:>8,}"
+              f"{sm['turnover']:>14,.0f}{sm['fee']:>11,.0f}{sm['pnl']:>+14,.0f}"
+              f"{sm['edge']*100:>+7.2f}%{sm['win_rate']*100:>6.1f}%")
     if gt:
         print("    " + "-" * (len(hdr) - 4))
-        print(f"    {'GABUNGAN':<26}{'':>8}{'':>8}{'':>8}{'':>7}{gt:>14,.0f}"
-              f"{gp:>+14,.0f}{gp/gt*100:>+8.2f}%")
+        print(f"    {'GABUNGAN':<26}{'':>8}{'':>8}{'':>8}{gt:>14,.0f}{'':>11}"
+              f"{gp:>+14,.0f}{gp/gt*100:>+7.2f}%")
+    E = th["E_return"]
+    print(f"    teoretis: sebelum fee {(1-E)*100:+.2f}% | sesudah fee 3% atas payout"
+          f" {(1-E-E*0.03)*100:+.2f}% | bandar menang {th['p_house']*100:.2f}%")
+
+    # kumpulkan spin dan kategori percobaan
+    counts = {"autowin": 0, "lose": 0, "res": 0, "win": 0}
+    sp_player: list[tuple] = []
+    sp_hoster: list[tuple] = []
+    for fidx, pth in enumerate(paths):
+        txt = Path(pth).read_text(encoding="utf-8", errors="replace")
+        for m in RE_HASIL.finditer(txt):
+            for k, rm in enumerate(RE_ROUND.finditer(m.group(1))):
+                sp_player.append(((fidx, m.start(), k), int(rm.group(1))))
+            sp_hoster.append(((fidx, m.start(), 9), int(m.group(2))))
+            t = int(m.group(3))
+            counts["res" if t == 2 else ("lose" if t == 0 else "win")] += 1
+        for m in RE_AUTOW.finditer(txt):
+            sp_hoster.append(((fidx, m.start(), 9), int(m.group(1))))
+            counts["autowin"] += 1
+    # urutkan menurut (file, posisi, urutan ronde) supaya spin auto-win tidak
+    # menumpuk di ujung daftar dan menciptakan autokorelasi palsu
+    spins_player = [v for _, v in sorted(sp_player)]
+    spins_hoster = [v for _, v in sorted(sp_hoster)]
 
     print(f"\n[3] VALIDASI MODEL ATURAN (tingkat percobaan, tanpa parsing payout)")
     N = sum(counts.values())
@@ -174,8 +159,6 @@ def audit(paths: list[str]) -> None:
     # dikumpulkan oleh dua regex terpisah; kalau tidak diurutkan ulang, semua
     # spin auto-win (yang selalu berskor 0/1) menumpuk di ujung daftar dan
     # menciptakan autokorelasi palsu yang ekstrem.
-    spins_player = [v for _, v in sorted(spins_player)]
-    spins_hoster = [v for _, v in sorted(spins_hoster)]
     for nama, arr in (("SPIN PEMAIN", spins_player), ("SPIN HOSTER", spins_hoster)):
         print(f"\n    --- {nama} (n={len(arr):,}) ---")
         for t in run_battery(arr, WHEEL):
