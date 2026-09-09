@@ -3,3 +3,7 @@ __pycache__/
 *.csv
 !examples/*.csv
 .venv/
+# jangan pernah commit export chat (berisi nomor telepon & data pribadi)
+*_chat.txt
+*HOSTER*.txt
+data/

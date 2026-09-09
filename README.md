@@ -238,3 +238,86 @@ Yang dirasakan manusia adalah **median**, bukan mean.
 **"Gw rugi di hampir semua sesi" bukan bukti kecurangan.** Untuk membuktikan
 curang, P&L totalmu harus dibandingkan dengan distribusi P&L dari RNG jujur —
 dan itu persis yang dilakukan `bankroll_monte_carlo()`.
+
+---
+
+# STUDI KASUS NYATA: audit game "LEME" (Gemspin) di grup WhatsApp
+
+Toolkit ini dipakai pada data asli: export chat WhatsApp berisi **6.026 ronde**
+dan **18.078 putaran roda** dari bot kasino `Omni_Bot`, dari sudut pandang
+seorang hoster yang merasa terus-menerus rugi.
+
+Reproduksi:
+```bash
+python3 analyze_leme.py "Chat WhatsApp dengan LEME HOSTER.txt"
+```
+
+## Aturan yang berhasil direkonstruksi
+
+Roda roulette Eropa **0-36**. Skor sebuah angka = **jumlah digit mod 10**
+(`26 -> 8`, `19 -> 0`, `36 -> 9`). Pemain memutar 2x, hoster 1x. Tiap ronde-pemain:
+
+| Kondisi skor pemain | Multiplier |
+|---|---|
+| skor 0 | **x4** (LEME jackpot) |
+| skor 1 | **x3** (LEME jackpot) |
+| skor 9 | x0 (auto-lose) |
+| skor > skor hoster | x2 |
+| skor <= skor hoster (seri ikut kalah) | x0 |
+
+`Multiplier total` = jumlah dua ronde. **Payout = bet x multiplier / 2.**
+
+Model ini memprediksi keluaran bot dengan akurasi **6.026/6.026 = 100,00%**,
+jadi aturannya bukan tebakan.
+
+## Temuan
+
+**1. Roda pemain JUJUR.** Seluruh bateri lolos (chi-square p=0,13; entropi
+99,95% dari maksimum; runs, autokorelasi, transisi, gap semuanya wajar) pada
+12.052 putaran.
+
+**2. Roda hoster DIBATASI - dan itu MENGUNTUNGKAN hoster.** Angka
+`{0, 1, 10, 19, 28, 29}` tidak pernah muncul sekalipun dalam 6.026 putaran
+(peluang kebetulan sekitar 1e-463). Semuanya berskor 0 atau 1. Artinya hoster
+tidak pernah dapat skor rendah yang bikin pemain gampang menang.
+
+**3. Tidak ada kecurangan bersyarat.** Bias vs besar taruhan (p=0,08), tren
+(p=0,11), drift waktu (p=0,59), CUSUM (p=0,68). Pemain anomali sesudah
+koreksi FDR: **0**.
+
+**4. Aturannya sendiri yang membunuh bandar.**
+
+| Skenario | Pengembalian ke pemain | House edge |
+|---|---|---|
+| Aturan tertulis, roda seragam | **126,0%** | **-26,0%** |
+| Realita bot (hoster dibatasi) | **111,5%** | **-11,5%** |
+
+**5. Rekonsiliasi P&L - tidak ada sisa yang tak terjelaskan.**
+
+| | Coin |
+|---|---|
+| Turnover | 137.470.044 |
+| P&L hoster nyata | **-16.381.830** |
+| P&L yang diprediksi aturan | -15.775.064 |
+| Simpangan baku | 2.141.924 |
+
+**z = -0,283 (p = 0,777).** Kerugian nyata meleset kurang dari sepertiga
+simpangan baku dari yang diprediksi aturan.
+
+## Kesimpulan
+
+**Hoster tidak dicurangi. Hoster kalah karena matematika.** Setiap coin yang
+hilang sudah terjelaskan oleh aturan main; tidak ada sisa kerugian yang
+memerlukan penjelasan kecurangan.
+
+## Perbaikan
+
+Pembagi payout `/2` yang terlalu murah hati adalah akar masalahnya:
+
+| Target house edge | Pembagi (roda bot sekarang) | Pembagi (kalau hoster tidak dibatasi) |
+|---|---|---|
+| +2% | 2,275 | 2,572 |
+| +5% | **2,347** | 2,653 |
+| +10% | 2,477 | 2,800 |
+
+Selama pembaginya masih 2,000, hoster dijamin rugi - seberapa jujur pun rodanya.
