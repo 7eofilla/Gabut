@@ -241,107 +241,88 @@ dan itu persis yang dilakukan `bankroll_monte_carlo()`.
 
 ---
 
-# STUDI KASUS: audit game "LEME" (Gemspin) di grup WhatsApp
+# STUDI KASUS: audit game "LEME" (Gemspin), bot WhatsApp Omni_Bot
 
-Toolkit ini dipakai pada data asli dari bot kasino `Omni_Bot`: empat export
-chat WhatsApp, total **20.358 putaran roda** dan **5.045 taruhan tuntas**.
+Empat export chat, **7.648 percobaan**, **5.996 taruhan tuntas**, **20.358
+putaran roda**.
 
 ```bash
-python3 analyze_leme.py "Chat WhatsApp dengan LEME HOSTER.txt"
+python3 analyze_leme.py "Chat WhatsApp dengan LEME HOSTER.txt" [chat lain...]
 ```
 
-## Pelajaran metodologis terpenting dari studi kasus ini
-
-**Audit versi pertama menghasilkan kesimpulan yang TERBALIK, dan penyebabnya
-bukan statistik melainkan parsing.** Ini didokumentasikan di sini karena
-justru inilah pelajaran paling berharganya.
-
-Dua cacat di `parse_omnibot.py` (v1):
-
-| Cacat | Akibat |
-|---|---|
-| Event `🚀 HOSTER AUTO-WIN` pakai format pesan berbeda dan **tidak punya blok `Hasil`** | 1.223 ronde yang DIMENANGKAN bandar hilang dari data |
-| `♻️ RES — restart` (RGO) diabaikan | Percobaan yang seharusnya diulang tanpa bayar, dihitung sebagai payout |
-
-Akibat gabungannya: house edge terhitung **−26%** padahal sebenarnya **+27%**.
-
-Efek sampingnya lebih berbahaya lagi. Karena semua ronde auto-win hilang,
-enam angka `{0, 1, 10, 19, 28, 29}` terlihat **tidak pernah muncul** di spin
-hoster — 6.026 kali berturut-turut, peluang kebetulan 1e−463. Itu tampak
-seperti bukti kecurangan yang tak terbantahkan. Padahal itu murni **bekas
-alat ukur yang rusak**.
-
-> **Sebelum menjalankan uji statistik apa pun, buktikan dulu parser-mu
-> menangkap SEMUA jenis kejadian.** Sebuah p-value sebesar 1e−463 sekalipun
-> hanya sekuat asumsi pengumpulan datanya. Ekstraksi yang bias menghasilkan
-> "bukti" yang jauh lebih meyakinkan daripada kecurangan yang sesungguhnya.
-
-Cara mendeteksinya: hitung kejadian per jenis pesan dan pastikan neraca
-tertutup — jumlah taruhan harus sama dengan jumlah penyelesaian.
-Ketidakcocokan adalah kejadian yang terlewat, bukan anomali.
-
-## Aturan yang berhasil direkonstruksi (diverifikasi 6.026/6.026 ronde)
+## Aturan (setiap butir diverifikasi terhadap keluaran bot)
 
 Roda roulette Eropa **0–36**. Skor = **jumlah digit mod 10** (`26→8`, `19→0`).
 Pemain memutar 2x, hoster 1x.
 
 1. **Hoster skor 0 atau 1 → `HOSTER AUTO-WIN`**, mengalahkan apa pun termasuk
-   jackpot pemain. Terjadi pada 16,22% ronde. Ini aturan terkuat bandar.
-2. Kalau tidak, tiap ronde-pemain dinilai:
+   jackpot pemain (16,22% ronde).
+2. Selain itu, tiap ronde-pemain: skor 0 → ×4 · skor 1 → ×3 · skor 2 atau 9 →
+   ×0 · skor > hoster → ×2 · seri atau lebih kecil → ×0.
+3. **`Multiplier total` = ×0** → bandar menang.
+4. **`Multiplier total` = ×2** → `♻️ RES`, **diulang tanpa dibayar**.
+5. **Sisanya** → `payout = bet × multiplier ÷ 2`.
 
-| Skor pemain | Multiplier |
-|---|---|
-| 0 | ×4 (jackpot) |
-| 1 | ×3 (jackpot) |
-| 2 atau 9 | ×0 (auto-lose) |
-| > skor hoster | ×2 |
-| ≤ skor hoster (seri ikut kalah) | ×0 |
+> Butir 4 adalah kuncinya, dan halus. RES **hanya** terjadi pada ×2, yaitu satu
+> *normal win* + satu kalah. Kombinasi **jackpot + kalah** menghasilkan ×3/×4
+> dan **tetap dibayar**. Menebak "satu menang satu kalah selalu RES" membuat
+> perkiraan house edge meleset dari +8% menjadi +27%.
 
-3. **Dua-duanya menang** → `payout = bet × multiplier_total ÷ 2`
-4. **Dua-duanya kalah** → bandar menang
-5. **Satu menang satu kalah** → `♻️ RES` — **diulang, tidak dibayar** (32,84%)
+Bukti: blok `×2` berjumlah 1.296 dan event `RES` berjumlah 1.297 — cocok.
 
-Verifikasi payout pada data: bet 20.000 dengan ×4 → 40.000 ✓ ;
-bet 40.000 dengan ×6 → 120.000 ✓.
+## Hasil
 
-## Hasil audit
+**Model aturan terkonfirmasi** pada 7.648 percobaan, tanpa parsing pesan payout:
 
-**1. RNG-nya jujur.** Seluruh bateri lolos di ketiga populasi spin:
-
-| Populasi | n | chi² | p |
+| Kategori | Diamati | Teori | z |
 |---|---|---|---|
-| Spin pemain | 12.710 | 45,39 | 0,27 |
-| Spin hoster | 7.648 | 47,13 | 0,20 |
-| Gabungan | 20.358 | 44,11 | 0,25 |
+| Auto-win hoster | 16,91% | 16,22% | +1,64 |
+| Pemain kalah | 30,01% | 30,99% | −1,85 |
+| RES / restart | 17,76% | 17,47% | +0,66 |
+| Pemain dibayar | 35,33% | 35,33% | **−0,00** |
 
-Replikasi independen pada 1.604 spin dari export **berbeda dan lebih baru**:
-semua tes lolos. Dua sumber data terpisah, kesimpulan sama.
+**RNG jujur.** Dua belas tes, dua populasi, semuanya lolos:
 
-**2. Tidak ada kecurangan bersyarat.** Bias vs besar taruhan p=0,35; tren
-p=0,21; pemain anomali sesudah koreksi FDR: 0 yang merugikan bandar.
+| | n | chi² | Runs | Autokor. | Transisi | Gap |
+|---|---|---|---|---|---|---|
+| Spin pemain | 12.710 | 0,27 | 0,42 | 0,59 | 0,24 | 0,63 |
+| Spin hoster | 7.648 | 0,20 | 0,69 | 0,14 | 0,29 | 0,88 |
 
-**3. Bandar UNTUNG BESAR, dan itu sesuai desain.**
+**Bandar untung, sesuai desain:**
 
 | | Nilai |
 |---|---|
-| House edge teoretis | **+27,40%** |
-| Edge terealisasi (marker otoritatif) | **+26,37%** |
-| Turnover | 114.043.110 coin |
-| **P&L bandar** | **+30.076.070 coin** |
+| House edge teoretis | **+8,32%** |
+| Edge terealisasi | **+8,61%** |
+| Bandar menang | 57,4% (teori 57,19%; z=+0,25, p=0,80) |
+| Turnover | 139.740.662 coin |
+| **P&L bandar** | **+12.026.882 coin** |
 
-Taksiran dari tiga metode parsing berbeda: +27,14% / +26,37% / +14,28%.
-Besarannya belum presisi; **arahnya tidak diragukan lagi**.
+## Pelajaran metodologis: empat artefak, nol kecurangan
 
-## Sisa pertanyaan yang jujur
+Audit ini menghasilkan **empat "temuan" palsu berturut-turut**, semuanya dari
+pengumpulan data, bukan dari RNG. Didokumentasikan karena inilah isi
+sesungguhnya dari pekerjaan forensik.
 
-Bandar menang **67,45%** taruhan, sedangkan model memprediksi **70,29%**
-(z = −4,41; p = 1e−05). Selisih 2,8 poin persen ini kecil dan tidak mengubah
-kesimpulan profitabilitas, tetapi **belum terjelaskan**. Kemungkinan: masih
-ada detail aturan yang belum tertangkap, atau mekanisme `GO ALL` mempengaruhi
-taruhan mana yang tercatat tuntas. Butuh data periode berikutnya.
+| # | Cacat | "Temuan" palsu yang dihasilkan |
+|---|---|---|
+| 1 | Event `HOSTER AUTO-WIN` tak terbaca (format pesan lain, tanpa blok `Hasil`) | Enam angka "tak pernah muncul" di 6.026 spin hoster, **peluang 1e−463** |
+| 2 | `RES` diabaikan → percobaan yang diulang dihitung sebagai payout | House edge **−26%** (padahal +8%) |
+| 3 | Spin pemain & hoster diuji berselang-seling (R1,R2,Hoster,…) | Uji transisi **p=0** karena pola periodik |
+| 4 | Spin dikumpulkan per-regex lalu digabung tanpa diurutkan ulang | Autokorelasi **p=2e−6** karena spin auto-win menumpuk di ujung |
+
+Artefak #1 adalah yang paling berbahaya: p-value **1e−463** terasa seperti
+bukti yang tak terbantahkan. Padahal itu cuma bekas alat ukur yang rusak.
+
+> **Sebuah p-value hanya sekuat asumsi pengumpulan datanya.** Ekstraksi yang
+> bias menghasilkan bukti yang jauh lebih meyakinkan daripada kecurangan yang
+> sesungguhnya. Sebelum menjalankan uji apa pun: pastikan neraca kejadian
+> tertutup (jumlah taruhan = jumlah penyelesaian), dan pastikan urutan datamu
+> adalah urutan kejadian yang sebenarnya.
 
 ## Kesimpulan
 
-Aturan main LEME sangat menguntungkan bandar (+27%), RNG-nya lolos semua uji
-keacakan, dan tidak ada bukti kecurangan bersyarat. Kalau seorang hoster tetap
-merasa rugi, penyebabnya ada **di luar meja** — bukan di RNG-nya.
+Aturan LEME memberi bandar keunggulan **+8,3%**, RNG-nya lolos seluruh uji
+keacakan pada dua populasi dan dua periode terpisah, dan tidak ada bias
+bersyarat terhadap besar taruhan, waktu, maupun pemain. Kalau seorang hoster
+tetap merasa rugi, penyebabnya berada **di luar meja**.

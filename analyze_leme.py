@@ -2,101 +2,187 @@
 """
 Audit lengkap game "LEME"/Gemspin dari export chat WhatsApp Omni_Bot.
 
-Pemakaian:
-    python3 analyze_leme.py "Chat WhatsApp dengan LEME HOSTER.txt"
+    python3 analyze_leme.py chat1.txt [chat2.txt ...]
 
-Skrip ini memuat seluruh rantai bukti: rekonstruksi aturan, verifikasinya
-terhadap output bot, uji keacakan roda, forensik bersyarat, rekonsiliasi P&L,
-dan perhitungan perbaikan aturan.
+Akuntansi di sini TIDAK memakai pesan payout sama sekali. Nominal taruhan
+diambil dari pesan "Bet diterima"/"GO ALL", dan hasilnya dari "Multiplier
+total" yang dicetak bot. Ini penting: bot memakai empat format pengumuman
+kemenangan yang berbeda antar versi, dan mengandalkannya pernah membuat
+audit ini salah total. Multiplier selalu ada dan selalu sama formatnya.
 """
+from __future__ import annotations
+
+import bisect
+import re
 import sys
-from collections import Counter
+from itertools import product
+from pathlib import Path
 
 import numpy as np
 from scipy import stats
 
-from rngaudit.parse_omnibot import parse
 from rngaudit.stats_core import run_battery, frequency_test
-from rngaudit.forensics import Round, bias_vs_stake, per_player_anomaly, temporal_drift
 
-WHEEL = 37                                    # roulette Eropa 0..36
+WHEEL = 37
 score = lambda n: sum(int(c) for c in str(n)) % 10
 
+RE_HASIL = re.compile(r"📊 \*Hasil\*\n((?:R\d+: .*\n)+)Hoster: (\d+)\nMultiplier total: ×(\d+)")
+RE_ROUND = re.compile(r"R\d+: (\d+) → (.*)")
+RE_AUTOW = re.compile(r"🚀 \*HOSTER AUTO-WIN!\*\nHoster spin: (\d+)")
+RE_BET   = re.compile(r"✅ Bet @⁨([^⁩]*)⁩ \*([\d.,]+)\*")
+RE_GOALL = re.compile(r"🚀 \*GO ALL!\* @⁨([^⁩]*)⁩ taruhan \*([\d.,]+) coin\*")
+RE_SPIN  = re.compile(r"spin the wheel and got (\d+)")
 
-def round_multiplier(s: int, h: int) -> int:
-    """Aturan LEME per ronde-pemain. Diverifikasi 100% terhadap 6.026 ronde."""
+_num = lambda s: float(s.replace(".", "").replace(",", ""))
+
+
+# --------------------------------------------------------------------------
+# ATURAN (setiap butir diverifikasi terhadap keluaran bot)
+# --------------------------------------------------------------------------
+def round_multiplier(s: int, hs: int) -> int:
     if s == 0: return 4          # LEME jackpot
     if s == 1: return 3          # LEME jackpot
-    if s == 9: return 0          # auto-lose
-    return 2 if s > h else 0     # seri pun kalah
+    if s in (2, 9): return 0     # auto-lose
+    return 2 if s > hs else 0    # seri ikut kalah
 
 
-def main(path: str) -> None:
-    rounds, spins = parse(path)
-    pl = [s.value for s in spins if s.role == "player"]
-    ho = [s.value for s in spins if s.role == "hoster"]
-    B = "=" * 74
+def settle(total: int) -> str:
+    """
+    x0  -> bandar menang
+    x2  -> RES: satu 'normal win' + satu kalah, diulang TANPA dibayar
+    sisanya -> pemain dibayar bet x total/2
 
-    print(B); print(f"AUDIT LEME  |  {len(rounds):,} ronde  |  {len(spins):,} spin"); print(B)
+    Perhatikan: x2 adalah SATU-SATUNYA yang memicu RES. Kombinasi
+    'jackpot + kalah' menghasilkan x3 atau x4 dan TETAP DIBAYAR - inilah
+    yang membedakan model ini dari tebakan naif 'satu menang satu kalah = RES'.
+    """
+    if total == 0: return "house"
+    if total == 2: return "res"
+    return "player"
 
-    # 1 -- verifikasi model aturan
-    ok = sum(1 for r in rounds if len(r.player_spins) == 2 and
-             sum(round_multiplier(score(p), score(r.hoster_spin))
-                 for p in r.player_spins) == r.multiplier)
-    print(f"\n[1] Model aturan cocok dengan output bot: {ok:,}/{len(rounds):,} "
-          f"({ok/len(rounds)*100:.2f}%)")
 
-    # 2 -- keacakan roda
-    print(f"\n[2] Keseragaman roda")
-    for nama, arr in (("spin PEMAIN", pl), ("spin HOSTER", ho)):
-        t = frequency_test(arr, WHEEL)
-        print(f"    {nama:<13} n={len(arr):>6,}  chi2={t.statistic:9.2f}  p={t.p_value:.3e}"
-              f"  -> {'MENYIMPANG' if t.p_value < .05 else 'wajar'}")
-    miss = sorted(set(range(WHEEL)) - set(ho))
-    print(f"    angka absen dari spin hoster: {miss} (skor {[score(m) for m in miss]})")
-    print(f"    peluang absen kebetulan     : (31/37)^{len(ho)} = 1e{len(ho)*np.log10(31/37):.0f}")
+def theory() -> dict:
+    aw = lose = res = win = 0
+    pay = 0.0
+    for h, s1, s2 in product(range(WHEEL), repeat=3):
+        hs = score(h)
+        if hs in (0, 1):                       # HOSTER AUTO-WIN
+            aw += 1
+            continue
+        t = round_multiplier(score(s1), hs) + round_multiplier(score(s2), hs)
+        r = settle(t)
+        if r == "house": lose += 1
+        elif r == "res": res += 1
+        else: win += 1; pay += t / 2
+    T = WHEEL ** 3
+    house, player = (aw + lose) / T, win / T
+    return {"autowin": aw/T, "lose": lose/T, "res": res/T, "win": player,
+            "p_house": house/(house+player),
+            "E_return": (pay/T/player) * (player/(house+player))}
 
-    # 3 -- house edge
-    Em_uni = 2 * sum(round_multiplier(score(p), score(h))
-                     for h in range(WHEEL) for p in range(WHEEL)) / WHEEL**2
-    Em_obs = float(np.mean([r.multiplier for r in rounds]))
-    print(f"\n[3] House edge  (payout = bet x multiplier / 2)")
-    print(f"    aturan tertulis, roda seragam : pengembalian {Em_uni/2*100:7.3f}%"
-          f"  -> edge bandar {(1-Em_uni/2)*100:+7.3f}%")
-    print(f"    realita bot (hoster dibatasi) : pengembalian {Em_obs/2*100:7.3f}%"
-          f"  -> edge bandar {(1-Em_obs/2)*100:+7.3f}%")
 
-    # 4 -- forensik bersyarat
-    R = [Round(idx=i, outcome=r.hoster_spin, player=r.who or "?", stake=r.bet,
-               house_won=(r.multiplier == 0), profit=r.bet - r.bet*r.multiplier/2, ts=float(i))
-         for i, r in enumerate(rounds) if r.bet]
-    print(f"\n[4] Forensik bersyarat ({len(R):,} ronde ber-taruhan)")
-    for t in list(bias_vs_stake(R)) + list(temporal_drift(R)):
-        print(f"    {t}")
-    flag = [t for t in per_player_anomaly(R, min_rounds=40) if t.suspicious]
-    print(f"    pemain anomali sesudah koreksi FDR: {len(flag)}")
+def audit(paths: list[str]) -> None:
+    th = theory()
+    B = "=" * 84
+    print(B); print("AUDIT LEME (Gemspin) — Omni_Bot"); print(B)
 
-    # 5 -- rekonsiliasi P&L: sial, curang, atau aturan rusak?
-    turnover = sum(r.stake for r in R)
-    pnl = sum(r.profit for r in R)
-    expected = turnover * (1 - Em_obs/2)
-    sd = float(np.std([r.profit for r in R]) * np.sqrt(len(R)))
-    z = (pnl - expected) / sd
-    print(f"\n[5] Rekonsiliasi P&L")
-    print(f"    turnover                 : {turnover:>16,.0f}")
-    print(f"    P&L bandar NYATA         : {pnl:>+16,.0f}")
-    print(f"    P&L yang DIPREDIKSI aturan: {expected:>+16,.0f}")
-    print(f"    simpangan baku           : {sd:>16,.0f}")
-    print(f"    z = {z:+.3f}  (p dua sisi = {2*stats.norm.sf(abs(z)):.3f})")
-    print(f"    -> {'sesuai prediksi aturan; tidak ada sisa kerugian tak terjelaskan'if abs(z)<2 else 'ADA penyimpangan di luar aturan'}")
+    print(f"\n[1] HOUSE EDGE TEORETIS (roda 0-36 seragam)")
+    print(f"    auto-win hoster {th['autowin']*100:5.2f}% | kalah {th['lose']*100:5.2f}%"
+          f" | RES {th['res']*100:5.2f}% | dibayar {th['win']*100:5.2f}%")
+    print(f"    bandar menang (setelah RES tuntas) : {th['p_house']*100:.2f}%")
+    print(f"    pengembalian ke pemain             : {th['E_return']*100:.2f}%")
+    print(f"    >>> HOUSE EDGE = {(1-th['E_return'])*100:+.2f}% <<<")
 
-    # 6 -- perbaikan
-    print(f"\n[6] Perbaikan: ganti pembagi payout (sekarang 2.000)")
-    for edge in (0.02, 0.05, 0.10):
-        print(f"    edge +{int(edge*100):2d}% -> pembagi {Em_obs/(1-edge):.3f}"
-              f"   (kalau hoster tidak dibatasi: {Em_uni/(1-edge):.3f})")
+    print(f"\n[2] REKONSTRUKSI TARUHAN")
+    hdr = f"    {'dataset':<26}{'tuntas':>8}{'bandar':>8}{'pemain':>8}{'RES':>7}{'turnover':>14}{'P&L':>14}{'edge':>9}{'win%':>7}"
+    print(hdr); print("    " + "-" * (len(hdr) - 4))
+    gt = gp = 0.0
+    spins_player: list[int] = []
+    spins_hoster: list[int] = []
+    counts = {"autowin": 0, "lose": 0, "res": 0, "win": 0}
+
+    for fidx, p in enumerate(paths):
+        txt = Path(p).read_text(encoding="utf-8", errors="replace")
+        ev = sorted(
+            [(m.start(), "bet", _num(m.group(2))) for m in RE_BET.finditer(txt)] +
+            [(m.start(), "bet", _num(m.group(2))) for m in RE_GOALL.finditer(txt)] +
+            [(m.start(), "hasil", int(m.group(3))) for m in RE_HASIL.finditer(txt)] +
+            [(m.start(), "autowin", -1) for m in RE_AUTOW.finditer(txt)])
+
+        for m in RE_HASIL.finditer(txt):
+            for k, rm in enumerate(RE_ROUND.finditer(m.group(1))):
+                # kunci urut: (file, posisi blok, urutan ronde dalam blok)
+                spins_player.append(((fidx, m.start(), k), int(rm.group(1))))
+            spins_hoster.append(((fidx, m.start(), 9), int(m.group(2))))
+            counts["res" if int(m.group(3)) == 2 else
+                   ("lose" if int(m.group(3)) == 0 else "win")] += 1
+        for m in RE_AUTOW.finditer(txt):
+            spins_hoster.append(((fidx, m.start(), 9), int(m.group(1)))); counts["autowin"] += 1
+        # CATATAN: baris "spin the wheel and got N" dari bot roulette adalah
+        # GEMA dari spin yang sama, bukan putaran tambahan. Memasukkannya akan
+        # menggandakan setiap spin dan menciptakan korelasi berurutan palsu
+        # (uji transisi langsung menyala p=0). Jadi hanya blok Hasil dan
+        # auto-win yang dipakai - itu catatan permainan yang otoritatif.
+
+        stake = None; pnl = turn = 0.0; nH = nP = nR = 0
+        for _, kind, val in ev:
+            if kind == "bet":
+                stake = val
+            elif stake is None:
+                continue
+            elif kind == "autowin":
+                pnl += stake; turn += stake; nH += 1; stake = None
+            else:
+                r = settle(val)
+                if r == "res": nR += 1; continue
+                if r == "house": pnl += stake; nH += 1
+                else: pnl += stake - stake * val / 2; nP += 1
+                turn += stake; stake = None
+
+        n = nH + nP
+        name = Path(p).stem[:26]
+        if n < 20:
+            print(f"    {name:<26}{n:>8}   -- sampel <20, tidak disimpulkan --"); continue
+        gt += turn; gp += pnl
+        print(f"    {name:<26}{n:>8,}{nH:>8,}{nP:>8,}{nR:>7,}{turn:>14,.0f}"
+              f"{pnl:>+14,.0f}{pnl/turn*100:>+8.2f}%{nH/n*100:>6.1f}%")
+
+    if gt:
+        print("    " + "-" * (len(hdr) - 4))
+        print(f"    {'GABUNGAN':<26}{'':>8}{'':>8}{'':>8}{'':>7}{gt:>14,.0f}"
+              f"{gp:>+14,.0f}{gp/gt*100:>+8.2f}%")
+
+    print(f"\n[3] VALIDASI MODEL ATURAN (tingkat percobaan, tanpa parsing payout)")
+    N = sum(counts.values())
+    print(f"    {'kategori':<20}{'diamati':>10}{'teori':>10}{'z':>8}")
+    for k, lab in [("autowin", "auto-win hoster"), ("lose", "pemain kalah"),
+                   ("res", "RES / restart"), ("win", "pemain dibayar")]:
+        o = counts[k] / N
+        se = np.sqrt(th[k] * (1 - th[k]) / N)
+        z = (o - th[k]) / se
+        print(f"    {lab:<20}{o*100:>9.2f}%{th[k]*100:>9.2f}%{z:>8.2f}"
+              f"{'  <-- MENYIMPANG' if abs(z) > 3 else ''}")
+    print(f"    total percobaan: {N:,}")
+
+    # Diuji TERPISAH per peran, tidak digabung. Spin hoster dan spin pemain
+    # muncul berselang-seling (R1, R2, Hoster, R1, R2, Hoster, ...), dan spin
+    # hoster di blok Hasil tidak pernah berskor 0/1 karena kasus itu menjadi
+    # auto-win. Menggabungkannya menciptakan pola periodik buatan yang
+    # langsung menyalakan uji transisi (p=0) tanpa ada yang salah pada RNG.
+    print(f"\n[4] KEACAKAN RODA — diuji terpisah per peran")
+    # Urutkan sesuai posisi kemunculan di chat. Blok Hasil dan blok auto-win
+    # dikumpulkan oleh dua regex terpisah; kalau tidak diurutkan ulang, semua
+    # spin auto-win (yang selalu berskor 0/1) menumpuk di ujung daftar dan
+    # menciptakan autokorelasi palsu yang ekstrem.
+    spins_player = [v for _, v in sorted(spins_player)]
+    spins_hoster = [v for _, v in sorted(spins_hoster)]
+    for nama, arr in (("SPIN PEMAIN", spins_player), ("SPIN HOSTER", spins_hoster)):
+        print(f"\n    --- {nama} (n={len(arr):,}) ---")
+        for t in run_battery(arr, WHEEL):
+            print(f"    {t}")
+
     print("\n" + B)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "chat.txt")
+    audit(sys.argv[1:] or ["chat.txt"])
