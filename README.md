@@ -210,3 +210,31 @@ Butuh: Python 3.11+, `numpy`, `scipy`.
 ```bash
 pip install numpy scipy
 ```
+
+---
+
+## Temuan yang paling mungkin relevan untuk kamu
+
+Jalankan:
+```bash
+python3 examples/kenapa_bandar_merasa_rugi.py
+```
+
+Hasilnya, dengan **RNG 100% jujur** dan **house edge +2.5%** (jadi bandar
+memang secara matematika untung):
+
+| Perilaku pemain | Mean P&L bandar | **Median** P&L bandar | % sesi bandar RUGI |
+|---|---|---|---|
+| Taruhan datar | +50 | +50 | 36.3% |
+| **Martingale** | **+196** | **−196** | **62.3%** |
+
+Baca baris kedua pelan-pelan. RNG-nya jujur. Edge-nya menguntungkan bandar.
+Rata-ratanya positif. **Tapi bandar rugi di 62% sesi, dan sesi tipikalnya minus.**
+
+Penyebabnya: pemain martingale menang kecil berkali-kali lalu kalah besar
+sesekali. Keuntungan bandar terkumpul di sedikit sesi besar yang jarang datang.
+Yang dirasakan manusia adalah **median**, bukan mean.
+
+**"Gw rugi di hampir semua sesi" bukan bukti kecurangan.** Untuk membuktikan
+curang, P&L totalmu harus dibandingkan dengan distribusi P&L dari RNG jujur —
+dan itu persis yang dilakukan `bankroll_monte_carlo()`.
