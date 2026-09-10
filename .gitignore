@@ -7,3 +7,5 @@ __pycache__/
 *_chat.txt
 *HOSTER*.txt
 data/
+# hasil analisis agregat boleh ikut (tidak memuat data pribadi)
+!hasil_analisis/*.csv
